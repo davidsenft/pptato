@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
+from .diagnostics import Diagnostic, LayoutError
 from .measure import MeasuredText, TextMeasurer, TextTooWide
 from .model import (
     Block,
@@ -26,6 +27,7 @@ from .model import (
     TextStyle,
     Theme,
 )
+from .sizing import WidthProfile, WidthRequirement, allocate_auto, constrain
 
 
 @dataclass(frozen=True)
@@ -45,26 +47,6 @@ class Box:
 
 
 @dataclass(frozen=True)
-class Diagnostic:
-    path: str
-    axis: str
-    required: float
-    available: float
-    suggestion: str
-    code: str = "overflow"
-
-
-class LayoutError(ValueError):
-    def __init__(self, diagnostic: Diagnostic):
-        self.diagnostic = diagnostic
-        super().__init__(
-            f"{diagnostic.path}: {diagnostic.axis} overflow; "
-            f"requires {diagnostic.required:.2f} pt, available {diagnostic.available:.2f} pt. "
-            f"{diagnostic.suggestion}"
-        )
-
-
-@dataclass(frozen=True)
 class Node:
     kind: str
     path: str
@@ -77,6 +59,7 @@ class Node:
     image_data: bytes | None = None
     padding: float = 0
     fill: str | None = None
+    column_requirements: tuple[WidthRequirement, ...] = ()
 
     def walk(self):
         yield self
@@ -159,6 +142,124 @@ class Engine:
     def __init__(self, theme: Theme):
         self.theme = theme
         self.measurer = TextMeasurer(theme.font)
+        self._intrinsics: dict[Block, tuple[float, float]] = {}
+
+    def text_style(self, block: Text | Bullets) -> TextStyle:
+        default = (
+            self.theme.heading
+            if isinstance(block, Heading)
+            else self.theme.note
+            if isinstance(block, Footnote)
+            else self.theme.body
+        )
+        return block.style or default
+
+    def table_profiles(self, block: Table) -> tuple[WidthProfile, ...]:
+        style = block.style or self.theme.table
+        padding = self.theme.cell_padding
+        styles = (replace(style, bold=True),) + (style,) * len(block.rows)
+        profiles = []
+        for values in zip(block.headers, *block.rows):
+            sizes = [
+                self.measurer.intrinsic((value,), cell_style)
+                for value, cell_style in zip(values, styles)
+            ]
+
+            def heights(width, values=values):
+                return tuple(
+                    self.measurer.measure((value,), width - 2 * padding, cell_style).height
+                    + 2 * padding
+                    for value, cell_style in zip(values, styles)
+                )
+
+            profiles.append(
+                WidthProfile(
+                    max(size[0] for size in sizes) + 2 * padding,
+                    max(size[1] for size in sizes) + 2 * padding,
+                    heights,
+                )
+            )
+        return tuple(profiles)
+
+    def profile(self, block: Block, path: str) -> WidthProfile:
+        minimum, preferred = self.intrinsic(block, path)
+        return WidthProfile(
+            minimum,
+            preferred,
+            lambda width: (self.resolve(block, 0, 0, width, float("inf"), path).box.height,),
+        )
+
+    def intrinsic(self, block: Block, path: str) -> tuple[float, float]:
+        """Width requirements of a subtree, respecting nested allocation modes."""
+        if block in self._intrinsics:
+            return self._intrinsics[block]
+        if isinstance(block, (Text, Bullets)):
+            texts = tuple(block.items) if isinstance(block, Bullets) else (block.text,)
+            result = self.measurer.intrinsic(
+                texts, self.text_style(block), bullets=isinstance(block, Bullets)
+            )
+        elif isinstance(block, (Row, Table)):
+            profiles = (
+                self.table_profiles(block)
+                if isinstance(block, Table)
+                else tuple(
+                    self.profile(child, f"{path}/{index}")
+                    for index, child in enumerate(block.children)
+                )
+            )
+            extra = (
+                0
+                if isinstance(block, Table)
+                else 2 * block.padding
+                + max(0, len(profiles) - 1) * (self.theme.gap if block.gap is None else block.gap)
+            )
+            if not profiles:
+                result = (extra, extra)
+            elif block.widths == "auto":
+                requirements = constrain(profiles, block.bounds, path)
+                result = (
+                    sum(r.minimum for r in requirements) + extra,
+                    sum(r.preferred for r in requirements) + extra,
+                )
+            else:
+                ratios = (1,) * len(profiles) if block.widths == "equal" else block.widths
+                scaled = [value / max(ratios) for value in ratios]
+                shares = [value / sum(scaled) for value in scaled]
+                if any(share == 0 for share in shares):
+                    raise LayoutError(
+                        Diagnostic(
+                            path,
+                            "width",
+                            1,
+                            0,
+                            "Width weights differ too greatly to allocate finite space.",
+                        )
+                    )
+                result = (
+                    max(p.minimum / share for p, share in zip(profiles, shares)) + extra,
+                    max(p.preferred / share for p, share in zip(profiles, shares)) + extra,
+                )
+        elif isinstance(block, Stack):
+            sizes = [
+                self.intrinsic(child, f"{path}/{index}")
+                for index, child in enumerate(block.children)
+            ]
+            result = (
+                max((size[0] for size in sizes), default=0) + 2 * block.padding,
+                max((size[1] for size in sizes), default=0) + 2 * block.padding,
+            )
+        elif isinstance(block, Image):
+            from PIL import ImageOps
+
+            with PILImage.open(block.path) as image:
+                oriented = ImageOps.exif_transpose(image)
+                result = (0, block.height * oriented.width / oriented.height)
+        elif isinstance(block, Spacer):
+            result = (0, 0)
+        else:
+            raise TypeError(f"{path}: unsupported block {type(block).__name__}")
+        self._intrinsics[block] = result
+        return result
 
     def text(
         self,
@@ -188,14 +289,7 @@ class Engine:
         _fit(0, width, path, "width")
         _fit(0, available, path, "height")
         if isinstance(block, (Text, Bullets)):
-            default = (
-                self.theme.heading
-                if isinstance(block, Heading)
-                else self.theme.note
-                if isinstance(block, Footnote)
-                else self.theme.body
-            )
-            style = block.style or default
+            style = self.text_style(block)
             texts = tuple(block.items) if isinstance(block, Bullets) else (block.text,)
             measured = self.text(texts, width, style, path, bullets=isinstance(block, Bullets))
             node = Node("text", path, Box(x, y, width, measured.height), text=measured, style=style)
@@ -206,8 +300,21 @@ class Engine:
             _fit(2 * padding, available, path, "height")
             inner = width - 2 * padding
             children: list[Node] = []
+            requirements = ()
+            widths = ()
             if isinstance(block, Row):
-                widths = allocate_widths(inner, len(block.children), block.widths, gap, path)
+                if block.widths == "auto":
+                    widths, requirements = allocate_auto(
+                        inner - max(0, len(block.children) - 1) * gap,
+                        tuple(
+                            self.profile(child, f"{path}/{index}")
+                            for index, child in enumerate(block.children)
+                        ),
+                        block.bounds,
+                        path,
+                    )
+                else:
+                    widths = allocate_widths(inner, len(block.children), block.widths, gap, path)
                 current_x = x + padding
                 for index, (child, child_width) in enumerate(zip(block.children, widths)):
                     children.append(
@@ -249,9 +356,17 @@ class Engine:
                 path,
                 Box(x, y, width, height),
                 tuple(children),
+                column_widths=widths,
+                column_requirements=requirements,
             )
         elif isinstance(block, Table):
-            widths = allocate_widths(width, len(block.headers), block.widths, 0, path)
+            requirements = ()
+            if block.widths == "auto":
+                widths, requirements = allocate_auto(
+                    width, self.table_profiles(block), block.bounds, path, table=True
+                )
+            else:
+                widths = allocate_widths(width, len(block.headers), block.widths, 0, path)
             style = block.style or self.theme.table
             padding = self.theme.cell_padding
             for column_index, cell_width in enumerate(widths):
@@ -297,10 +412,11 @@ class Engine:
             node = Node(
                 "table",
                 path,
-                Box(x, y, width, current_y - y),
+                Box(x, y, sum(widths), current_y - y),
                 tuple(children),
                 column_widths=widths,
                 row_heights=tuple(row_heights),
+                column_requirements=requirements,
             )
         elif isinstance(block, Image):
             data = block.path.read_bytes()

@@ -40,6 +40,28 @@ class TextMeasurer:
     def __init__(self, family: FontFamily):
         self.family = family
         self._fonts: dict[tuple[float, bool], ImageFont.FreeTypeFont] = {}
+        self._lengths: dict[tuple[str, float, bool], float] = {}
+
+    def length(self, text: str, style: TextStyle) -> float:
+        key = (text, style.size, style.bold)
+        if key not in self._lengths:
+            self._lengths[key] = self.font(style).getlength(text) / self.SCALE
+        return self._lengths[key]
+
+    def intrinsic(
+        self, texts: tuple[str, ...], style: TextStyle, *, bullets: bool = False
+    ) -> tuple[float, float]:
+        """Longest unbreakable word and longest normalized hard line, in points."""
+        if not texts:
+            return 0.0, 0.0
+        overhead = self.SAFETY + (style.size if bullets else 0)
+        minimum = preferred = 0.0
+        for text in texts:
+            for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                words = re.findall(r"\S+", line)
+                minimum = max(minimum, max((self.length(word, style) for word in words), default=0))
+                preferred = max(preferred, self.length(" ".join(words), style))
+        return minimum + overhead, preferred + overhead
 
     def fingerprint(self) -> dict[str, str]:
         import PIL
@@ -80,11 +102,11 @@ class TextMeasurer:
                 words = re.findall(r"\S+", hard_line)
                 current = ""
                 for word in words:
-                    word_width = font.getlength(word) / self.SCALE
-                    if word_width > usable:
+                    word_width = self.length(word, style)
+                    if word_width > usable + 1e-6:
                         raise TextTooWide(word, word_width + indent + self.SAFETY)
                     candidate = f"{current} {word}" if current else word
-                    if current and font.getlength(candidate) / self.SCALE > usable:
+                    if current and self.length(candidate, style) > usable + 1e-6:
                         lines.append(current)
                         current = word
                     else:

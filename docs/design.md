@@ -8,6 +8,8 @@ diagnostics. The initial backend is python-pptx.
 
 - `model.py`: content, containers, theme, and the author-facing deck API.
 - `measure.py`: font metrics and width-dependent text wrapping.
+- `sizing.py`: bounded content-aware width allocation shared by tables and rows.
+- `diagnostics.py`: fit errors shared by measurement and allocation.
 - `layout.py`: allocation, reserved slide regions, immutable resolved nodes,
   diagnostics, and JSON inspection.
 - `renderers/pptx.py`: native text, bullets, tables, and individual images.
@@ -24,7 +26,8 @@ happens at the renderer boundary.
 
 `Stack` lays children out vertically at their measured heights. `Row` allocates
 horizontal space; `Columns` is its presentation-oriented spelling. Children
-receive equal widths or positive relative weights. Row alignment supports start,
+receive equal widths, positive relative weights, or automatic widths with optional
+`ColumnWidth` bounds. Row alignment supports start,
 center, and end against the tallest child. Containers have explicit padding and
 gaps; there is no margin collapsing. Empty containers contribute only padding.
 
@@ -82,8 +85,11 @@ The first slice includes text, headings, simple bullets, nested stacks/rows,
 weighted columns, notes, basic native tables, individual images, resolved boxes,
 and strict overflow errors. Custom text styles allow deliberate font changes.
 
-Next: automatic table/column widths with explicit bounds; bounded opt-in shrink;
-table continuation with repeated headers and note scope; rich text; shared
+The second milestone adds [automatic table and column widths](automatic-widths.md)
+with explicit bounds, measured height profiles, and inspectable width requirements.
+
+Next: table continuation with repeated headers and note scope; bounded opt-in shrink;
+rich text; shared
 caption/baseline alignment; and native charts. Keep these out of the initial
 allocator until examples establish their contracts. In particular, do not
 silently choose a new column count or omit content to make a slide fit.

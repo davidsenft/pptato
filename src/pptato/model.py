@@ -144,15 +144,42 @@ class Stack:
 
 
 @dataclass(frozen=True)
+class ColumnWidth:
+    """Hard bounds in points for one automatically sized column, including padding."""
+
+    minimum: float = 0
+    maximum: float | None = None
+
+    def __post_init__(self) -> None:
+        positive(self.minimum, "minimum column width", zero=True)
+        if self.maximum is not None:
+            positive(self.maximum, "maximum column width")
+            if self.maximum < self.minimum:
+                raise ValueError("maximum column width must be at least minimum")
+
+
+def _column_bounds(bounds, widths, count: int) -> tuple[ColumnWidth, ...]:
+    if bounds is None or len(bounds) == 0:
+        return ()
+    if widths != "auto":
+        raise ValueError("Column bounds require widths='auto'")
+    result = tuple(bounds)
+    if len(result) != count or any(not isinstance(bound, ColumnWidth) for bound in result):
+        raise ValueError("Provide one ColumnWidth bound for each column")
+    return result
+
+
+@dataclass(frozen=True)
 class Row(Stack):
-    widths: Sequence[float] | Literal["equal"] = "equal"
+    widths: Sequence[float] | Literal["equal", "auto"] = "equal"
     align: Literal["start", "center", "end"] = "start"
+    bounds: Sequence[ColumnWidth] | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if isinstance(self.widths, str):
-            if self.widths != "equal":
-                raise ValueError("widths supports 'equal' or positive relative weights")
+            if self.widths not in ("equal", "auto"):
+                raise ValueError("widths supports 'equal', 'auto', or positive relative weights")
         else:
             object.__setattr__(self, "widths", tuple(self.widths))
             if len(self.widths) != len(self.children):
@@ -161,18 +188,22 @@ class Row(Stack):
                 positive(value, "width weight")
         if self.align not in ("start", "center", "end"):
             raise ValueError("align must be start, center, or end")
+        object.__setattr__(
+            self, "bounds", _column_bounds(self.bounds, self.widths, len(self.children))
+        )
 
 
 class Columns(Row):
-    """A row of equal or weighted columns."""
+    """A row of equal, weighted, or content-aware columns."""
 
 
 @dataclass(frozen=True)
 class Table:
     headers: Sequence[str]
     rows: Sequence[Sequence[str]]
-    widths: Sequence[float] | Literal["equal"] = "equal"
+    widths: Sequence[float] | Literal["equal", "auto"] = "equal"
     style: TextStyle | None = None
+    bounds: Sequence[ColumnWidth] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", tuple(str(v) for v in self.headers))
@@ -182,14 +213,17 @@ class Table:
         if any(len(row) != len(self.headers) for row in self.rows):
             raise ValueError("Every table row must match the header column count")
         if isinstance(self.widths, str):
-            if self.widths != "equal":
-                raise ValueError("Table widths supports 'equal' or relative weights")
+            if self.widths not in ("equal", "auto"):
+                raise ValueError("Table widths supports 'equal', 'auto', or relative weights")
         else:
             object.__setattr__(self, "widths", tuple(self.widths))
             if len(self.widths) != len(self.headers):
                 raise ValueError("Provide one width weight per table column")
             for value in self.widths:
                 positive(value, "table width weight")
+        object.__setattr__(
+            self, "bounds", _column_bounds(self.bounds, self.widths, len(self.headers))
+        )
 
 
 @dataclass(frozen=True)

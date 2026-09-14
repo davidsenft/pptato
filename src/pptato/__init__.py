@@ -4,6 +4,7 @@ from .layout import Box, Diagnostic, Layout, LayoutError, Node
 from .model import (
     Bullets,
     Columns,
+    ColumnWidth,
     Deck,
     FontFamily,
     Footnote,
@@ -22,6 +23,7 @@ __all__ = [
     "Box",
     "Bullets",
     "Columns",
+    "ColumnWidth",
     "Deck",
     "Diagnostic",
     "FontFamily",

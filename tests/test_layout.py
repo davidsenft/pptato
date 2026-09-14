@@ -215,7 +215,7 @@ def test_image_preserves_aspect_and_snapshots_bytes(theme, tmp_path):
     [
         lambda: Columns([Text("x")], widths=[0]),
         lambda: Columns([Text("x")], widths=[1, 2]),
-        lambda: Columns([], widths="auto"),
+        lambda: Columns([], widths="unsupported"),
         lambda: Stack([], gap=-1),
         lambda: Spacer(float("nan")),
         lambda: Table(["A", "B"], [["One"]]),
