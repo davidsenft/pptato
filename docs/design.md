@@ -83,12 +83,16 @@ general international typography support. Unbreakable words raise width errors.
 
 The first slice includes text, headings, simple bullets, nested stacks/rows,
 weighted columns, notes, basic native tables, individual images, resolved boxes,
-and strict overflow errors. Custom text styles allow deliberate font changes.
+and strict overflow errors by default. Custom text styles allow deliberate font changes.
 
 The second milestone adds [automatic table and column widths](automatic-widths.md)
 with explicit bounds, measured height profiles, and inspectable width requirements.
 
-Next: table continuation with repeated headers and note scope; bounded opt-in shrink;
+The third milestone adds [explicit overflow policies](table-overflow.md): bounded
+opt-in shrink with readability warnings, and whole-row continuation for dedicated
+table slides with repeated headers and slide notes.
+
+Next: nested continuation and row-specific note scope; ordered overflow remedies;
 rich text; shared
 caption/baseline alignment; and native charts. Keep these out of the initial
 allocator until examples establish their contracts. In particular, do not

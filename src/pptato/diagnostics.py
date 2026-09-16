@@ -11,6 +11,11 @@ class Diagnostic:
     available: float
     suggestion: str
     code: str = "overflow"
+    severity: str = "error"
+
+
+class LayoutWarning(UserWarning):
+    """A rendered layout crosses an explicitly allowed readability threshold."""
 
 
 class LayoutError(ValueError):

@@ -51,8 +51,9 @@ allocation under the same bounds. It does not guarantee a globally minimal
 height. Changes in available width can select different sampled candidates.
 For difficult layouts, callers can supply deliberate relative widths instead.
 An ordinary height error describes the chosen layout, not a proof that every
-possible allocation would fail. Automatic sizing does not shrink text, remove
-rows, alter the number of columns, or paginate.
+possible allocation would fail. Automatic width sizing alone does not shrink
+text, remove rows, alter the number of columns, or paginate. Explicit
+[overflow policies](table-overflow.md) can opt into shrinking or continuation.
 
 If total maxima leave unused width, tables occupy only the sum of their final
 columns, aligned to the left of their allotted region. Rows retain their outer

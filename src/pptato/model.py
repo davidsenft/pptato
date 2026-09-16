@@ -198,14 +198,44 @@ class Columns(Row):
 
 
 @dataclass(frozen=True)
+class TextFit:
+    """Opt-in table text fitting, with an allowed warning band (all sizes in points)."""
+
+    preferred: float = 15
+    normal_min: float = 12
+    absolute_min: float = 10
+
+    def __post_init__(self) -> None:
+        for name in ("preferred", "normal_min", "absolute_min"):
+            positive(getattr(self, name), name)
+        if not self.absolute_min <= self.normal_min <= self.preferred:
+            raise ValueError("TextFit requires absolute_min <= normal_min <= preferred")
+
+    def candidates(self) -> tuple[float, ...]:
+        """Descending quarter-point steps, including both exact threshold boundaries."""
+        steps = math.floor((self.preferred - self.absolute_min) / 0.25)
+        values = {self.preferred - index * 0.25 for index in range(steps + 1)}
+        values.update((self.normal_min, self.absolute_min))
+        return tuple(sorted(values, reverse=True))
+
+
+@dataclass(frozen=True)
 class Table:
     headers: Sequence[str]
     rows: Sequence[Sequence[str]]
     widths: Sequence[float] | Literal["equal", "auto"] = "equal"
     style: TextStyle | None = None
     bounds: Sequence[ColumnWidth] | None = None
+    overflow: Literal["error", "shrink", "continue"] = "error"
+    fit: TextFit | None = None
 
     def __post_init__(self) -> None:
+        if self.overflow not in ("error", "shrink", "continue"):
+            raise ValueError("Table overflow must be 'error', 'shrink', or 'continue'")
+        if self.overflow == "shrink" and not isinstance(self.fit, TextFit):
+            raise ValueError("overflow='shrink' requires an explicit TextFit policy")
+        if self.overflow != "shrink" and self.fit is not None:
+            raise ValueError("TextFit is only valid with overflow='shrink'")
         object.__setattr__(self, "headers", tuple(str(v) for v in self.headers))
         object.__setattr__(self, "rows", tuple(tuple(str(v) for v in row) for row in self.rows))
         if not self.headers:

@@ -1,6 +1,7 @@
 """Declarative slide composition with explicit layout results."""
 
-from .layout import Box, Diagnostic, Layout, LayoutError, Node
+from .diagnostics import LayoutWarning
+from .layout import Box, Continuation, Diagnostic, Layout, LayoutError, Node, TableFit
 from .model import (
     Bullets,
     Columns,
@@ -15,6 +16,7 @@ from .model import (
     Stack,
     Table,
     Text,
+    TextFit,
     TextStyle,
     Theme,
 )
@@ -24,6 +26,7 @@ __all__ = [
     "Bullets",
     "Columns",
     "ColumnWidth",
+    "Continuation",
     "Deck",
     "Diagnostic",
     "FontFamily",
@@ -32,12 +35,15 @@ __all__ = [
     "Image",
     "Layout",
     "LayoutError",
+    "LayoutWarning",
     "Node",
     "Row",
     "Spacer",
     "Stack",
     "Table",
+    "TableFit",
     "Text",
     "TextStyle",
+    "TextFit",
     "Theme",
 ]

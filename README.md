@@ -5,8 +5,9 @@ Declarative Python layout for native, editable PowerPoint presentations.
 Describe the content and its arrangement. pptato computes column widths, text
 heights, table rows, spacing, and space for notes before writing a `.pptx`.
 
-This is an early prototype. Overflow raises a `LayoutError`; the library never
-silently drops content or shrinks fonts.
+This is an early prototype. Overflow raises a `LayoutError` by default. Tables
+can explicitly opt into bounded text shrinking or continuation onto more slides.
+The library never silently drops content or enables either remedy.
 
 ## Development setup
 
@@ -111,6 +112,59 @@ notes. It writes `outputs/auto-widths.pptx` and a JSON snapshot and prints two
 expected constraint failures. Resolved nodes expose `column_widths` and
 `column_requirements` (effective minimum, preferred, and maximum widths).
 
+## Explicit table overflow policies
+
+`Table(..., overflow="error")` is the default: fitting neither adds slides nor
+changes font size. Two opt-in alternatives are available.
+
+```python
+from pptato import Table, TextFit
+
+table = Table(
+    headers=["Batch", "Files"],
+    rows=[["North", "24"], ["South", "17"]],
+    widths="auto",
+    overflow="shrink",
+    fit=TextFit(preferred=15, normal_min=12, absolute_min=10),
+)
+```
+
+`shrink` tests sizes from the preferred size down to the absolute minimum,
+remeasuring columns and rows at each candidate. It selects the largest fitting
+candidate in quarter-point steps, also testing the exact normal/absolute minima.
+The explicit `preferred` size overrides the table's style/theme font size; other
+styling and padding remain unchanged. Header boldness is preserved.
+
+| Selected size in this example | Result |
+| --- | --- |
+| 12–15 pt | Render normally |
+| 10–below 12 pt | Render, emit `LayoutWarning`, and record a readability diagnostic |
+| No candidate fits at or above 10 pt | Raise `LayoutError` with code `text_fit_limit` |
+
+Set `absolute_min=normal_min` to prohibit the warning range. The resolved table's
+`table_fit` records preferred/selected sizes, thresholds, and status even when
+no warning is needed. `layout.diagnostics` stores warning details and is included
+in the JSON snapshot. Warnings emit during layout, not when saving an already
+resolved result. Shrink never falls back to continuation.
+
+For continuation, use `Table(..., overflow="continue")` as the slide's **entire
+body**. The engine splits between complete rows, repeats headers and all slide
+notes, and appends “(continued)” to subsequent titles. It measures widths once
+using the whole table and preserves them across pages. Font sizes do not change.
+The source `Deck` stays unchanged. Inspect `layout.slides` for the resulting
+slide count and each slide/table's `continuation` metadata for source slide,
+part count, and original data row range.
+
+Nested continuation is currently rejected explicitly. Shrink can be used in
+nested layouts; a table in a stack reserves following siblings' natural heights
+before fitting. Several independently shrinking siblings are not a joint layout
+optimization. A row too tall to fit with its header on a fresh continuation
+slide raises `continuation_row_too_tall`. No rows or cells are split or omitted.
+
+Run `python examples/table_overflow.py` for normal/warning fits, continuation,
+and deliberate failures. See [the overflow design](docs/table-overflow.md) for
+details and limitations. Ordered combinations of remedies are deferred.
+
 ## Fonts and fit
 
 The default resolves a known installed font family and its matching regular/bold
@@ -139,5 +193,5 @@ Geometry is deterministic with the same font files and measurement runtime.
 Rendered appearance can vary across office applications.
 
 See [the design note](docs/design.md) and [automatic sizing](docs/automatic-widths.md)
-for architecture and limitations. Rich text, pagination, native charts, and
-opt-in shrinking are planned follow-on work.
+for architecture and limitations. Rich text, nested continuation, native charts,
+and ordered overflow fallback policies are planned follow-on work.

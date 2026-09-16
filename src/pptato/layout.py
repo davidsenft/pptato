@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from io import BytesIO
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from .diagnostics import Diagnostic, LayoutError
+from .diagnostics import Diagnostic, LayoutError, LayoutWarning
 from .measure import MeasuredText, TextMeasurer, TextTooWide
 from .model import (
     Block,
@@ -20,6 +21,7 @@ from .model import (
     Heading,
     Image,
     Row,
+    Slide,
     Spacer,
     Stack,
     Table,
@@ -47,6 +49,26 @@ class Box:
 
 
 @dataclass(frozen=True)
+class TableFit:
+    preferred_size: float
+    selected_size: float
+    normal_min: float
+    absolute_min: float
+    status: str
+
+
+@dataclass(frozen=True)
+class Continuation:
+    """Original slide is one-based; data row range is zero-based, end-exclusive."""
+
+    source_slide: int
+    part: int
+    parts: int
+    row_start: int
+    row_end: int
+
+
+@dataclass(frozen=True)
 class Node:
     kind: str
     path: str
@@ -60,6 +82,8 @@ class Node:
     padding: float = 0
     fill: str | None = None
     column_requirements: tuple[WidthRequirement, ...] = ()
+    table_fit: TableFit | None = None
+    continuation: Continuation | None = None
 
     def walk(self):
         yield self
@@ -193,6 +217,21 @@ class Engine:
         """Width requirements of a subtree, respecting nested allocation modes."""
         if block in self._intrinsics:
             return self._intrinsics[block]
+        if isinstance(block, Table) and block.overflow == "shrink":
+            style = block.style or self.theme.table
+            floor = replace(
+                block, overflow="error", fit=None, style=replace(style, size=block.fit.absolute_min)
+            )
+            preferred = replace(floor, style=replace(style, size=block.fit.preferred))
+            minimum = self.intrinsic(floor, path)[0]
+            try:
+                desired = self.intrinsic(preferred, path)[1]
+            except LayoutError:
+                # A maximum may reject preferred-size text yet admit the explicit floor.
+                desired = self.intrinsic(floor, path)[1]
+            result = minimum, max(minimum, desired)
+            self._intrinsics[block] = result
+            return result
         if isinstance(block, (Text, Bullets)):
             texts = tuple(block.items) if isinstance(block, Bullets) else (block.text,)
             result = self.measurer.intrinsic(
@@ -288,6 +327,13 @@ class Engine:
     ) -> Node:
         _fit(0, width, path, "width")
         _fit(0, available, path, "height")
+        if isinstance(block, Table) and block.overflow == "continue":
+            raise ValueError(
+                f"{path}: overflow='continue' requires a Table as the slide body; "
+                "nested table continuation is not supported yet"
+            )
+        if isinstance(block, Table) and block.overflow == "shrink":
+            return self.fit_table(block, x, y, width, available, path)
         if isinstance(block, (Text, Bullets)):
             style = self.text_style(block)
             texts = tuple(block.items) if isinstance(block, Bullets) else (block.text,)
@@ -340,12 +386,22 @@ class Engine:
                     if index:
                         current_y += gap
                     _fit(current_y - y + padding, available, path, "height")
+                    trailing = 0.0
+                    if isinstance(child, Table) and child.overflow == "shrink":
+                        # Preserve space for following siblings before fitting this table.
+                        following = block.children[index + 1 :]
+                        trailing = sum(
+                            self.resolve(
+                                item, 0, 0, inner, float("inf"), f"{path}/{index + 1 + offset}"
+                            ).box.height
+                            for offset, item in enumerate(following)
+                        ) + gap * len(following)
                     resolved = self.resolve(
                         child,
                         x + padding,
                         current_y,
                         inner,
-                        y + available - padding - current_y,
+                        y + available - padding - current_y - trailing,
                         f"{path}/{index}",
                     )
                     children.append(resolved)
@@ -451,62 +507,194 @@ class Engine:
         _fit(node.box.height, available, path, "height")
         return node
 
+    def fit_table(
+        self, block: Table, x: float, y: float, width: float, available: float, path: str
+    ) -> Node:
+        policy = block.fit
+        style = block.style or self.theme.table
+        last_error = None
+        for size in policy.candidates():
+            candidate = replace(block, overflow="error", fit=None, style=replace(style, size=size))
+            try:
+                node = self.resolve(candidate, x, y, width, available, path)
+            except LayoutError as error:
+                last_error = error
+                continue
+            return replace(
+                node,
+                table_fit=TableFit(
+                    policy.preferred,
+                    size,
+                    policy.normal_min,
+                    policy.absolute_min,
+                    "warning" if size < policy.normal_min else "normal",
+                ),
+            )
+        diagnostic = replace(
+            last_error.diagnostic,
+            code="text_fit_limit",
+            suggestion=f"Table cannot fit at the absolute minimum {policy.absolute_min:g} pt. "
+            "Increase its space, reduce content, or explicitly choose overflow='continue'.",
+        )
+        raise LayoutError(diagnostic) from last_error
+
+
+def _slide_regions(
+    engine: Engine, size: tuple[float, float], slide: Slide, path: str, title_text: str
+) -> tuple[Node | None, Node | None, Box]:
+    theme = engine.theme
+    width, height = size
+    margin = theme.margin
+    body_width = width - 2 * margin
+    inner_height = height - 2 * margin
+    title = (
+        engine.resolve(
+            Text(title_text, theme.title), margin, margin, body_width, inner_height, f"{path}/title"
+        )
+        if title_text
+        else None
+    )
+    footer = (
+        engine.resolve(
+            Stack(slide.notes, gap=theme.note.paragraph_gap),
+            margin,
+            0,
+            body_width,
+            inner_height,
+            f"{path}/notes",
+        )
+        if slide.notes
+        else None
+    )
+    body_top = title.box.bottom + theme.title_gap if title else margin
+    body_bottom = height - margin
+    if footer:
+        footer = _move(footer, 0, height - margin - footer.box.height)
+        body_bottom = footer.box.y - theme.footer_gap
+    reserved = (body_top - margin) + (height - margin - body_bottom)
+    _fit(reserved, inner_height, f"{path}/reserved-regions", "height")
+    return title, footer, Box(margin, body_top, body_width, body_bottom - body_top)
+
+
+def _slide_node(size, path, title, footer, region_box, body) -> Node:
+    region = Node("body", f"{path}/body-region", region_box, (body,))
+    children = tuple(node for node in (title, region, footer) if node is not None)
+    return Node("slide", path, Box(0, 0, *size), children)
+
+
+def _table_fragment(full: Node, start: int, end: int, box: Box, path: str) -> Node:
+    """Reuse measured cells, header and widths; keep original row indices and striping."""
+    columns = len(full.column_widths)
+    indices = [0, *range(start + 1, end + 1)]
+    children = []
+    current_y = box.y
+    for row in indices:
+        for cell in full.children[row * columns : (row + 1) * columns]:
+            moved = _move(cell, box.x - full.box.x, current_y - cell.box.y)
+            children.append(replace(moved, path=path + cell.path[len(full.path) :]))
+        current_y += full.row_heights[row]
+    return replace(
+        full,
+        path=path,
+        box=Box(box.x, box.y, full.box.width, current_y - box.y),
+        children=tuple(children),
+        row_heights=tuple(full.row_heights[i] for i in indices),
+    )
+
+
+def _continue_table(
+    engine: Engine, deck: Deck, source: Slide, source_index: int, output_start: int
+) -> list[Node]:
+    table = source.body
+    normal = replace(table, overflow="error")
+    source_path = f"slide/{output_start}/body"
+    full = engine.resolve(
+        normal, 0, 0, deck.size[0] - 2 * engine.theme.margin, float("inf"), source_path
+    )
+    pages = []
+    ranges = []
+    cursor = 0
+    while not pages or cursor < len(table.rows):
+        path = f"slide/{output_start + len(pages)}"
+        title_text = source.title
+        if pages:
+            title_text = f"{source.title} (continued)" if source.title else "Continued"
+        title, footer, box = _slide_regions(engine, deck.size, source, path, title_text)
+        header_height = full.row_heights[0]
+        _fit(header_height, box.height, f"{path}/body/header", "height")
+        end = cursor
+        used = header_height
+        while end < len(table.rows) and used + full.row_heights[end + 1] <= box.height + 1e-6:
+            used += full.row_heights[end + 1]
+            end += 1
+        if end == cursor and cursor < len(table.rows):
+            raise LayoutError(
+                Diagnostic(
+                    f"{path}/body/row/{cursor + 1}",
+                    "height",
+                    header_height + full.row_heights[cursor + 1],
+                    box.height,
+                    "This row cannot fit with the repeated header on an otherwise empty table slide. "
+                    "Increase space, reduce row content, or explicitly choose a shrink policy.",
+                    "continuation_row_too_tall",
+                )
+            )
+        fragment = _table_fragment(full, cursor, end, box, f"{path}/body")
+        pages.append(_slide_node(deck.size, path, title, footer, box, fragment))
+        ranges.append((cursor, end))
+        cursor = end
+    result = []
+    for part, (page, (start, end)) in enumerate(zip(pages, ranges), start=1):
+        metadata = Continuation(source_index, part, len(pages), start, end)
+        children = tuple(
+            replace(child, children=(replace(child.children[0], continuation=metadata),))
+            if child.kind == "body"
+            else child
+            for child in page.children
+        )
+        result.append(replace(page, children=children, continuation=metadata))
+    return result
+
 
 def layout_deck(deck: Deck) -> Layout:
     theme = deck.theme
     engine = Engine(theme)
     width, height = deck.size
-    margin = theme.margin
-    _fit(margin * 2, width, "deck/margins", "width")
-    _fit(margin * 2, height, "deck/margins", "height")
-    body_width = width - 2 * margin
-    inner_height = height - 2 * margin
+    _fit(theme.margin * 2, width, "deck/margins", "width")
+    _fit(theme.margin * 2, height, "deck/margins", "height")
     slides = []
-    for index, slide in enumerate(deck.slides):
-        path = f"slide/{index + 1}"
-        title = (
-            engine.resolve(
-                Text(slide.title, theme.title),
-                margin,
-                margin,
-                body_width,
-                inner_height,
-                f"{path}/title",
-            )
-            if slide.title
-            else None
-        )
-        footer = (
-            engine.resolve(
-                Stack(slide.notes, gap=theme.note.paragraph_gap),
-                margin,
-                0,
-                body_width,
-                inner_height,
-                f"{path}/notes",
-            )
-            if slide.notes
-            else None
-        )
-        body_top = title.box.bottom + theme.title_gap if title else margin
-        body_bottom = height - margin
-        if footer:
-            footer = _move(footer, 0, height - margin - footer.box.height)
-            body_bottom = footer.box.y - theme.footer_gap
-        reserved = (body_top - margin) + (height - margin - body_bottom)
-        _fit(reserved, inner_height, f"{path}/reserved-regions", "height")
-        body = engine.resolve(
-            slide.body, margin, body_top, body_width, body_bottom - body_top, f"{path}/body"
-        )
-        # The body region records available space; its child records occupied space.
-        region = Node(
-            "body",
-            f"{path}/body-region",
-            Box(margin, body_top, body_width, body_bottom - body_top),
-            (body,),
-        )
-        children = tuple(node for node in (title, region, footer) if node is not None)
-        slides.append(Node("slide", path, Box(0, 0, width, height), children))
+    for index, slide in enumerate(deck.slides, start=1):
+        if isinstance(slide.body, Table) and slide.body.overflow == "continue":
+            slides.extend(_continue_table(engine, deck, slide, index, len(slides) + 1))
+            continue
+        path = f"slide/{len(slides) + 1}"
+        title, footer, box = _slide_regions(engine, deck.size, slide, path, slide.title)
+        body = engine.resolve(slide.body, box.x, box.y, box.width, box.height, f"{path}/body")
+        slides.append(_slide_node(deck.size, path, title, footer, box, body))
+    diagnostics = []
+    for slide in slides:
+        for node in slide.walk():
+            fit = node.table_fit
+            if fit is not None and fit.status == "warning":
+                diagnostic = Diagnostic(
+                    node.path,
+                    "font_size",
+                    fit.normal_min,
+                    fit.selected_size,
+                    f"Table text reduced from {fit.preferred_size:g} pt to "
+                    f"{fit.selected_size:g} pt, below the normal minimum "
+                    f"{fit.normal_min:g} pt (absolute minimum {fit.absolute_min:g} pt).",
+                    "readability_warning",
+                    "warning",
+                )
+                diagnostics.append(diagnostic)
+    # Emit only final decisions, never speculative candidates or failed layouts.
+    for diagnostic in diagnostics:
+        warnings.warn(f"{diagnostic.path}: {diagnostic.suggestion}", LayoutWarning, stacklevel=3)
     return Layout(
-        deck.size, theme.font.name, tuple(engine.measurer.fingerprint().items()), tuple(slides)
+        deck.size,
+        theme.font.name,
+        tuple(engine.measurer.fingerprint().items()),
+        tuple(slides),
+        tuple(diagnostics),
     )
